@@ -72,10 +72,37 @@ class PDFTab(ttk.Frame):
         self.current_stroke = None
         self.strokes = []
 
-        # canvas + scrollbars
-        self.canvas = tk.Canvas(self, bg="#e5e5e5", highlightthickness=0)
-        vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        hsb = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        # ===== Thumbnail sidebar (ซ้าย) =====
+        self.thumb_width = 140
+        self.thumb_photos = []
+        self.thumb_items = []   # (canvas_id, page_index, y_top, y_bottom)
+        self._thumb_current = None
+
+        thumb_frame = tk.Frame(self, bg="#2b2b2b", width=self.thumb_width + 20)
+        thumb_frame.pack(side=tk.LEFT, fill=tk.Y)
+        thumb_frame.pack_propagate(False)
+        self.thumb_frame = thumb_frame
+        self.thumb_visible = True
+
+        self.thumb_canvas = tk.Canvas(thumb_frame, bg="#2b2b2b",
+                                      highlightthickness=0, width=self.thumb_width + 4)
+        thumb_vsb = ttk.Scrollbar(thumb_frame, orient="vertical",
+                                  command=self.thumb_canvas.yview)
+        self.thumb_canvas.configure(yscrollcommand=thumb_vsb.set)
+        thumb_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.thumb_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.thumb_canvas.bind("<MouseWheel>",
+                               lambda e: self.thumb_canvas.yview_scroll(int(-e.delta / 120), "units"))
+        self.thumb_canvas.bind("<Button-1>", self._on_thumb_click)
+
+        # ===== Main canvas + scrollbars (ขวา) =====
+        main_frame = ttk.Frame(self)
+        main_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(main_frame, bg="#e5e5e5", highlightthickness=0)
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=self.canvas.yview)
+        hsb = ttk.Scrollbar(main_frame, orient="horizontal", command=self.canvas.xview)
         self.canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
@@ -87,6 +114,8 @@ class PDFTab(ttk.Frame):
         self.canvas.bind("<Control-MouseWheel>",
                          lambda e: self.zoom_in() if e.delta > 0 else self.zoom_out())
         self.canvas.bind("<Configure>", lambda e: self.render() if self.doc else None)
+
+        self.after(80, self.render_thumbnails)
 
     # ---------- Rendering ----------
     def render(self):
@@ -127,6 +156,23 @@ class PDFTab(ttk.Frame):
         self.canvas.configure(scrollregion=(0, 0, max(max_w, cw), y))
         self.app._sync_toolbar()
 
+    # ---------- Rotation ----------
+    def rotate_current(self, delta):
+        if not self.doc:
+            return
+        page = self.doc[self.page_index]
+        page.set_rotation((page.rotation + delta) % 360)
+        self.render()
+        self.render_thumbnails()
+
+    def rotate_all(self, delta):
+        if not self.doc:
+            return
+        for p in self.doc:
+            p.set_rotation((p.rotation + delta) % 360)
+        self.render()
+        self.render_thumbnails()
+
     # ---------- Scrolling ----------
     def _smooth_scroll(self, delta_px):
         if not self.page_offsets:
@@ -164,9 +210,15 @@ class PDFTab(ttk.Frame):
         if not self.page_offsets or index < 0 or index >= len(self.page_offsets):
             return
         top_y = self.page_offsets[index][0]
-        total_h = self.page_offsets[-1][1]
-        if total_h > 0:
-            self.canvas.yview_moveto(top_y / total_h)
+        try:
+            scroll_h = float(self.canvas.cget("scrollregion").split()[-1])
+        except (ValueError, IndexError):
+            scroll_h = self.page_offsets[-1][1]
+        if scroll_h > 0:
+            self.canvas.yview_moveto(top_y / scroll_h)
+        self._scroll_target = None
+        self._scroll_animating = False
+        self._highlight_thumb(index)
 
     def _update_current_page(self):
         if not self.page_offsets:
@@ -179,6 +231,80 @@ class PDFTab(ttk.Frame):
                 if self.page_index != i:
                     self.page_index = i
                     self.app._sync_toolbar()
+                self._highlight_thumb(i)
+                return
+
+    # ---------- Thumbnails ----------
+    def render_thumbnails(self):
+        if not self.doc:
+            return
+        self.thumb_canvas.delete("all")
+        self.thumb_photos = []
+        self.thumb_items = []
+
+        pad_x = 10
+        pad_y = 8
+        y = pad_y
+        max_w = self.thumb_width
+
+        for i in range(len(self.doc)):
+            page = self.doc[i]
+            r = page.rect
+            scale = self.thumb_width / max(r.width, 1)
+            mat = fitz.Matrix(scale, scale)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            photo = ImageTk.PhotoImage(img)
+            self.thumb_photos.append(photo)
+
+            rect_id = self.thumb_canvas.create_rectangle(
+                pad_x - 2, y - 2, pad_x + pix.width + 2, y + pix.height + 2,
+                outline="", width=2, tags=(f"thumb{i}",))
+            self.thumb_canvas.create_image(pad_x, y, image=photo, anchor="nw",
+                                           tags=(f"thumb{i}",))
+            self.thumb_canvas.create_text(
+                pad_x + pix.width / 2, y + pix.height + 10,
+                text=str(i + 1), fill="#cccccc", font=("Segoe UI", 9),
+                tags=(f"thumb{i}",))
+
+            self.thumb_items.append((rect_id, i, y - 2, y + pix.height + 2))
+            y += pix.height + 26
+            max_w = max(max_w, pix.width + 2 * pad_x)
+
+        self.thumb_canvas.configure(scrollregion=(0, 0, max_w, y))
+        self._highlight_thumb(self.page_index)
+
+    def _highlight_thumb(self, page_idx):
+        if page_idx == self._thumb_current:
+            return
+        self._thumb_current = page_idx
+        for rect_id, i, _, _ in self.thumb_items:
+            color = "#4a90e2" if i == page_idx else ""
+            self.thumb_canvas.itemconfig(rect_id, outline=color)
+        # เลื่อน thumbnail ให้เห็นหน้าปัจจุบัน
+        for rect_id, i, y_top, y_bot in self.thumb_items:
+            if i == page_idx:
+                total = float(self.thumb_canvas.cget("scrollregion").split()[-1] or 1)
+                view = self.thumb_canvas.yview()
+                view_h = (view[1] - view[0]) * total
+                if y_top < view[0] * total or y_bot > view[0] * total + view_h:
+                    self.thumb_canvas.yview_moveto(max(0, (y_top - 10) / total))
+                break
+
+    def toggle_thumbnails(self):
+        if self.thumb_visible:
+            self.thumb_frame.pack_forget()
+            self.thumb_visible = False
+        else:
+            self.thumb_frame.pack(side=tk.LEFT, fill=tk.Y, before=self.canvas.master)
+            self.thumb_visible = True
+        self.render()
+
+    def _on_thumb_click(self, event):
+        y = self.thumb_canvas.canvasy(event.y)
+        for _, i, y_top, y_bot in self.thumb_items:
+            if y_top <= y <= y_bot:
+                self.go_to_page(i)
                 return
 
     # ---------- Navigation ----------
@@ -723,6 +849,12 @@ class PDFReader(tk.Tk):
         menubar.add_command(label=self._menu_labels["cmt"], command=self.toggle_comment_mode)
         self._menu_index["cmt"] = menubar.index("end")
 
+        menubar.add_command(label="📑 Thumbnail", command=self._toggle_thumbnails)
+        menubar.add_command(label="↺ หมุนซ้าย", command=lambda: self._rotate(-90, all_pages=False))
+        menubar.add_command(label="↻ หมุนขวา", command=lambda: self._rotate(90, all_pages=False))
+        menubar.add_command(label="↺↺ หมุนซ้ายทุกหน้า", command=lambda: self._rotate(-90, all_pages=True))
+        menubar.add_command(label="↻↻ หมุนขวาทุกหน้า", command=lambda: self._rotate(90, all_pages=True))
+
         menubar.add_command(label="💾 บันทึก", command=self.save_doc)
         menubar.add_command(label="⛶ Full Screen", command=self.toggle_fullscreen)
         self._menubar = menubar
@@ -744,18 +876,6 @@ class PDFReader(tk.Tk):
                 base = self._menu_labels[key]
                 lbl = f"● {base} (กำลังใช้)" if is_active else base
                 self._menubar.entryconfig(idx, label=lbl)
-        # อัปเดตปุ่มสี — ถ้ากำลังใช้ให้เข้ม + ขอบขาว
-        for key, is_active in modes.items():
-            btn = self._mode_buttons.get(key)
-            if not btn:
-                continue
-            normal, active = self._mode_colors[key]
-            if is_active:
-                btn.config(bg=active, relief="sunken",
-                           highlightbackground="white", highlightthickness=2)
-            else:
-                btn.config(bg=normal, relief="flat",
-                           highlightthickness=0)
 
     def _build_toolbar(self):
         bar = ttk.Frame(self, padding=6)
@@ -784,35 +904,6 @@ class PDFReader(tk.Tk):
         ttk.Button(bar, text="ค้นหา", command=self._search).pack(side=tk.LEFT, padx=2)
         ttk.Button(bar, text="ถัดไป", command=self._next_hit).pack(side=tk.LEFT)
 
-        # แถบปุ่มสี (mode) — ด้านล่าง toolbar หลัก
-        self._build_mode_bar()
-
-    def _build_mode_bar(self):
-        bar = tk.Frame(self, bg="#f0f0f0", padx=6, pady=4)
-        bar.pack(side=tk.TOP, fill=tk.X)
-
-        # (key, label, สีปกติ, สีตอน active)
-        specs = [
-            ("sign",  "✍ เซ็นชื่อ",   "#3366cc", "#0033aa", self.toggle_sign_mode),
-            ("image", "🖼 ใส่รูป",     "#22aa55", "#118844", self.insert_image),
-            ("hl",    "🖍 ไฮไลต์",    "#ee9900", "#cc7700", self.toggle_highlight_mode),
-            ("draw",  "✏ ขีดเขียน",   "#e63946", "#c22235", self.toggle_draw_mode),
-            ("cmt",   "💬 คอมเมนต์",  "#9933cc", "#7722aa", self.toggle_comment_mode),
-            ("save",  "💾 บันทึก",    "#333333", "#333333", self.save_doc),
-        ]
-        self._mode_buttons = {}
-        self._mode_colors = {}
-        for key, label, normal, active, cmd in specs:
-            btn = tk.Button(bar, text=label, command=cmd,
-                            bg=normal, fg="white",
-                            activebackground=active, activeforeground="white",
-                            relief="flat", padx=12, pady=4,
-                            font=("Segoe UI", 9, "bold"),
-                            cursor="hand2", borderwidth=0)
-            btn.pack(side=tk.LEFT, padx=3)
-            self._mode_buttons[key] = btn
-            self._mode_colors[key] = (normal, active)
-
     def _build_notebook(self):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -831,6 +922,8 @@ class PDFReader(tk.Tk):
         self.notebook.bind("<Button-3>", self._on_tab_right_click)
         # คลิกกลาง (ลูกกลิ้ง) → ปิด
         self.notebook.bind("<Button-2>", self._on_tab_middle_click)
+        # คลิกซ้ายที่กากบาท ✕ → ปิด
+        self.notebook.bind("<ButtonRelease-1>", self._on_tab_left_click)
 
     def _build_statusbar(self):
         self.status = ttk.Label(self, text="เลือก 'เปิดไฟล์' เพื่อเริ่ม", anchor="w", padding=4)
@@ -970,6 +1063,26 @@ class PDFReader(tk.Tk):
             return
         self._close_tab_at(idx)
 
+    def _on_tab_left_click(self, event):
+        try:
+            idx = self.notebook.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            return
+        # หาขอบขวาของแท็บ: เลื่อน x ไปทางขวาจนกว่า tab index จะเปลี่ยน
+        x = event.x
+        limit = event.x + 300
+        while x < limit:
+            try:
+                if self.notebook.index(f"@{x + 1},{event.y}") != idx:
+                    break
+            except tk.TclError:
+                break
+            x += 1
+        # ถ้าคลิกใกล้ขอบขวา (บริเวณ ✕) → ปิด
+        if x - event.x <= 22:
+            self._close_tab_at(idx)
+            return "break"
+
     def _on_tab_middle_click(self, event):
         try:
             idx = self.notebook.index(f"@{event.x},{event.y}")
@@ -1059,6 +1172,24 @@ class PDFReader(tk.Tk):
             self.status.config(text="ส่งไปยังเครื่องพิมพ์แล้ว")
         except Exception as e:
             messagebox.showerror("ผิดพลาด", f"พิมพ์ไม่ได้: {e}")
+
+    def _toggle_thumbnails(self):
+        t = self._active_tab()
+        if not t:
+            return
+        t.toggle_thumbnails()
+
+    def _rotate(self, delta, all_pages=False):
+        t = self._active_tab()
+        if not t:
+            messagebox.showwarning("แจ้ง", "เปิดไฟล์ PDF ก่อน")
+            return
+        if all_pages:
+            t.rotate_all(delta)
+            self.status.config(text=f"หมุนทุกหน้า {delta:+d}°")
+        else:
+            t.rotate_current(delta)
+            self.status.config(text=f"หมุนหน้า {t.page_index + 1} {delta:+d}°")
 
     def save_doc(self):
         t = self._active_tab()
