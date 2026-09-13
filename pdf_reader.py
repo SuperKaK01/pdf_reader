@@ -1,7 +1,8 @@
 """
 PDF Reader - Desktop App
-Copyright (C) 2026 thanagrid.c@ku.th
-Licensed under GNU AGPL-3.0 — see LICENSE file for details.
+Developed by Thanagrid C. <Thanagrid.c@ku.th>
+Copyright (c) 2026
+Licensed under the MIT License — see LICENSE file for details.
 
 ต้องติดตั้ง: pip install PyMuPDF Pillow docx2pdf pywin32
 รัน: python pdf_reader.py
@@ -857,6 +858,7 @@ class PDFReader(tk.Tk):
 
         menubar.add_command(label="💾 บันทึก", command=self.save_doc)
         menubar.add_command(label="⛶ Full Screen", command=self.toggle_fullscreen)
+        menubar.add_command(label="ℹ About", command=self._show_about)
         self._menubar = menubar
         self.config(menu=menubar)
 
@@ -1172,6 +1174,18 @@ class PDFReader(tk.Tk):
             self.status.config(text="ส่งไปยังเครื่องพิมพ์แล้ว")
         except Exception as e:
             messagebox.showerror("ผิดพลาด", f"พิมพ์ไม่ได้: {e}")
+
+    def _show_about(self):
+        messagebox.showinfo(
+            "เกี่ยวกับโปรแกรม",
+            "PDF Reader\n"
+            "\n"
+            "พัฒนาโดย: Thanagrid C.\n"
+            "อีเมล: Thanagrid.c@ku.th\n"
+            "\n"
+            "License: MIT\n"
+            "© 2026"
+        )
 
     def _toggle_thumbnails(self):
         t = self._active_tab()
