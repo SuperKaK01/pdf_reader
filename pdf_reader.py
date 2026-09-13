@@ -1451,7 +1451,12 @@ class PDFReader(tk.Tk):
 if __name__ == "__main__":
     import traceback
     try:
-        PDFReader().mainloop()
+        app = PDFReader()
+        # เปิดไฟล์ที่ Windows ส่งมาผ่าน argv (double-click / Open with)
+        for arg in sys.argv[1:]:
+            if arg.lower().endswith(".pdf") and os.path.isfile(arg):
+                app.after(100, lambda p=arg: app._open_in_new_tab(p))
+        app.mainloop()
     except Exception:
         traceback.print_exc()
         input("\nกด Enter เพื่อปิด...")
