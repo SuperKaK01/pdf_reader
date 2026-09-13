@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.setup_done
+*.pdf
+!sample.pdf
