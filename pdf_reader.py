@@ -73,6 +73,9 @@ class PDFTab(ttk.Frame):
         self.current_stroke = None
         self.strokes = []
 
+        # dirty flag — ตั้ง True เมื่อมีการแก้ไข
+        self.dirty = False
+
         # ===== Thumbnail sidebar (ซ้าย) =====
         self.thumb_width = 140
         self.thumb_photos = []
@@ -163,6 +166,7 @@ class PDFTab(ttk.Frame):
             return
         page = self.doc[self.page_index]
         page.set_rotation((page.rotation + delta) % 360)
+        self.dirty = True
         self.render()
         self.render_thumbnails()
 
@@ -171,6 +175,7 @@ class PDFTab(ttk.Frame):
             return
         for p in self.doc:
             p.set_rotation((p.rotation + delta) % 360)
+        self.dirty = True
         self.render()
         self.render_thumbnails()
 
@@ -502,6 +507,7 @@ class PDFTab(ttk.Frame):
         page.draw_rect(fitz.Rect(x0, y0, x1, y1),
                        color=None, fill=(1, 0.95, 0.3), fill_opacity=0.4,
                        overlay=True)
+        self.dirty = True
         self.render()
 
     # ---------- Redact (ลบข้อความ) ----------
@@ -564,6 +570,7 @@ class PDFTab(ttk.Frame):
         # ใส่ redact annotation แล้ว apply เพื่อลบข้อความในบริเวณนั้น
         page.add_redact_annot(fitz.Rect(x0, y0, x1, y1), fill=(1, 1, 1))
         page.apply_redactions()
+        self.dirty = True
         self.render()
         self.render_thumbnails()
 
@@ -591,6 +598,7 @@ class PDFTab(ttk.Frame):
                     p2 = fitz.Point(*pts[i+1])
                     page.draw_line(p1, p2, color=(0.9, 0.1, 0.1), width=1.8)
             self._draw_strokes = []
+            self.dirty = True
         self.draw_mode = False
         self.canvas.config(cursor="")
         self.canvas.unbind("<ButtonPress-1>")
@@ -665,6 +673,7 @@ class PDFTab(ttk.Frame):
                 annot = page.add_text_annot(fitz.Point(px, py), content)
                 annot.set_info(title="Note")
                 annot.update()
+                self.dirty = True
             dlg.destroy()
             self.render()
 
@@ -723,7 +732,9 @@ class PDFTab(ttk.Frame):
             page = self.doc[p]
             rect = fitz.Rect(x0, y0, x1, y1)
             page.insert_image(rect, filename=img_path)
+            self.dirty = True
             self.doc.save(out, garbage=3, deflate=True)
+            self.dirty = False
             messagebox.showinfo("สำเร็จ", f"บันทึกแล้วที่:\n{out}")
         except Exception as e:
             messagebox.showerror("ผิดพลาด", str(e))
@@ -855,8 +866,10 @@ class PDFTab(ttk.Frame):
                     p1 = fitz.Point(pts[i][0], pts[i][1])
                     p2 = fitz.Point(pts[i+1][0], pts[i+1][1])
                     page.draw_line(p1, p2, color=(0, 0.2, 0.8), width=1.5)
+            self.dirty = True
             # ไม่วาดกรอบลง PDF — เป็นแค่ helper บนจอ
             self.doc.save(out, garbage=3, deflate=True)
+            self.dirty = False
             messagebox.showinfo("สำเร็จ", f"บันทึกแล้วที่:\n{out}")
             self.sign_cleanup()
         except Exception as e:
@@ -884,6 +897,7 @@ class PDFReader(tk.Tk):
         self._build_notebook()
         self._build_statusbar()
         self._bind_keys()
+        self.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
     # ---------- UI ----------
     def _build_menu(self):
@@ -1161,6 +1175,23 @@ class PDFReader(tk.Tk):
             return
         self._close_tab_at(idx)
 
+    def _on_app_close(self):
+        dirty_tabs = [t for t in self.tabs if getattr(t, "dirty", False)]
+        if dirty_tabs:
+            names = "\n".join(f"• {os.path.basename(t.doc_path)}" for t in dirty_tabs)
+            ans = messagebox.askyesnocancel(
+                "ยังไม่ได้บันทึก",
+                f"มีไฟล์ที่แก้ไขแล้วยังไม่ได้บันทึก:\n\n{names}\n\n"
+                "ต้องการบันทึกก่อนออกหรือไม่?")
+            if ans is None:
+                return  # Cancel — ไม่ปิดโปรแกรม
+            if ans:
+                for t in dirty_tabs:
+                    self.notebook.select(t)
+                    if not self.save_doc():
+                        return  # ผู้ใช้ยกเลิก save → หยุด
+        self.destroy()
+
     def _close_tab_at(self, idx):
         try:
             widget = self.notebook.nametowidget(self.notebook.tabs()[idx])
@@ -1171,6 +1202,18 @@ class PDFReader(tk.Tk):
         # หา PDFTab
         for t in self.tabs:
             if str(t) == str(widget):
+                if getattr(t, "dirty", False):
+                    ans = messagebox.askyesnocancel(
+                        "ยังไม่ได้บันทึก",
+                        f"'{os.path.basename(t.doc_path)}' มีการแก้ไขที่ยังไม่ได้บันทึก\n\n"
+                        "ต้องการบันทึกก่อนปิดหรือไม่?")
+                    if ans is None:  # Cancel — ไม่ปิด
+                        return
+                    if ans:  # Yes — บันทึกก่อน
+                        self.notebook.select(t)
+                        saved = self.save_doc()
+                        if not saved:
+                            return  # ยกเลิก save → ไม่ปิดแท็บ
                 t.close()
                 self.tabs.remove(t)
                 break
@@ -1298,9 +1341,12 @@ class PDFReader(tk.Tk):
             return self.save_doc()
         try:
             t.doc.save(out, garbage=3, deflate=True)
+            t.dirty = False
             messagebox.showinfo("สำเร็จ", f"บันทึกเป็นไฟล์ใหม่ที่:\n{out}")
+            return True
         except Exception as e:
             messagebox.showerror("ผิดพลาด", str(e))
+            return False
 
     def toggle_highlight_mode(self):
         t = self._active_tab()
