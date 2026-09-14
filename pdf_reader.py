@@ -76,6 +76,11 @@ class PDFTab(ttk.Frame):
         # dirty flag — ตั้ง True เมื่อมีการแก้ไข
         self.dirty = False
 
+        # undo/redo stacks — เก็บ snapshot ของ doc ก่อนแก้ไข
+        self.undo_stack = []
+        self.redo_stack = []
+        self.max_history = 20
+
         # ===== Thumbnail sidebar (ซ้าย) =====
         self.thumb_width = 140
         self.thumb_photos = []
@@ -160,10 +165,59 @@ class PDFTab(ttk.Frame):
         self.canvas.configure(scrollregion=(0, 0, max(max_w, cw), y))
         self.app._sync_toolbar()
 
+    # ---------- Undo / Redo ----------
+    def _snapshot(self):
+        """เก็บ state ปัจจุบันเพื่อ undo ก่อนแก้ไข doc"""
+        try:
+            self.undo_stack.append(self.doc.tobytes(garbage=0, deflate=False))
+            if len(self.undo_stack) > self.max_history:
+                self.undo_stack.pop(0)
+            self.redo_stack.clear()
+        except Exception:
+            pass
+
+    def _reload_from_bytes(self, data):
+        cur_page = self.page_index
+        try:
+            self.doc.close()
+        except Exception:
+            pass
+        self.doc = fitz.open(stream=data, filetype="pdf")
+        self.page_index = min(cur_page, len(self.doc) - 1)
+        self.render()
+        self.render_thumbnails()
+
+    def undo(self):
+        if not self.undo_stack:
+            return False
+        try:
+            current = self.doc.tobytes(garbage=0, deflate=False)
+            self.redo_stack.append(current)
+            data = self.undo_stack.pop()
+            self._reload_from_bytes(data)
+            self.dirty = bool(self.undo_stack)
+            return True
+        except Exception:
+            return False
+
+    def redo(self):
+        if not self.redo_stack:
+            return False
+        try:
+            current = self.doc.tobytes(garbage=0, deflate=False)
+            self.undo_stack.append(current)
+            data = self.redo_stack.pop()
+            self._reload_from_bytes(data)
+            self.dirty = True
+            return True
+        except Exception:
+            return False
+
     # ---------- Rotation ----------
     def rotate_current(self, delta):
         if not self.doc:
             return
+        self._snapshot()
         page = self.doc[self.page_index]
         page.set_rotation((page.rotation + delta) % 360)
         self.dirty = True
@@ -173,6 +227,7 @@ class PDFTab(ttk.Frame):
     def rotate_all(self, delta):
         if not self.doc:
             return
+        self._snapshot()
         for p in self.doc:
             p.set_rotation((p.rotation + delta) % 360)
         self.dirty = True
@@ -503,6 +558,7 @@ class PDFTab(ttk.Frame):
         y0, y1 = min(sy, ey), max(sy, ey)
         if (x1 - x0) < 5 or (y1 - y0) < 5:
             return
+        self._snapshot()
         page = self.doc[p]
         page.draw_rect(fitz.Rect(x0, y0, x1, y1),
                        color=None, fill=(1, 0.95, 0.3), fill_opacity=0.4,
@@ -566,6 +622,7 @@ class PDFTab(ttk.Frame):
         y0, y1 = min(sy, ey), max(sy, ey)
         if (x1 - x0) < 3 or (y1 - y0) < 3:
             return
+        self._snapshot()
         page = self.doc[p]
         # ใส่ redact annotation แล้ว apply เพื่อลบข้อความในบริเวณนั้น
         page.add_redact_annot(fitz.Rect(x0, y0, x1, y1), fill=(1, 1, 1))
@@ -591,6 +648,7 @@ class PDFTab(ttk.Frame):
     def _draw_commit(self):
         # เขียนเส้นลง doc
         if getattr(self, "_draw_strokes", None):
+            self._snapshot()
             for page_idx, pts in self._draw_strokes:
                 page = self.doc[page_idx]
                 for i in range(len(pts) - 1):
@@ -669,6 +727,7 @@ class PDFTab(ttk.Frame):
         def ok():
             content = txt.get("1.0", "end-1c").strip()
             if content:
+                self._snapshot()
                 page = self.doc[p]
                 annot = page.add_text_annot(fitz.Point(px, py), content)
                 annot.set_info(title="Note")
@@ -969,6 +1028,12 @@ class PDFReader(tk.Tk):
         ttk.Button(bar, text="＋ เปิดไฟล์", command=self.open_file).pack(side=tk.LEFT)
         ttk.Separator(bar, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=6)
 
+        self.undo_btn = ttk.Button(bar, text="↶ Undo", command=self.undo)
+        self.undo_btn.pack(side=tk.LEFT)
+        self.redo_btn = ttk.Button(bar, text="↷ Redo", command=self.redo)
+        self.redo_btn.pack(side=tk.LEFT, padx=(2, 0))
+        ttk.Separator(bar, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=6)
+
         ttk.Button(bar, text="◀", width=3, command=self._prev_page).pack(side=tk.LEFT)
         self.page_entry = ttk.Entry(bar, width=10, justify="center")
         self.page_entry.pack(side=tk.LEFT, padx=4)
@@ -1028,6 +1093,9 @@ class PDFReader(tk.Tk):
         self.bind("<Control-f>", lambda e: self.search_entry.focus_set())
         self.bind("<Control-plus>", lambda e: self._zoom_in())
         self.bind("<Control-minus>", lambda e: self._zoom_out())
+        self.bind("<Control-z>", lambda e: self.undo())
+        self.bind("<Control-y>", lambda e: self.redo())
+        self.bind("<Control-Shift-Z>", lambda e: self.redo())
 
     # ---------- Active tab helpers ----------
     def _active_tab(self):
@@ -1051,6 +1119,8 @@ class PDFReader(tk.Tk):
             self.page_entry.delete(0, tk.END)
             self.status.config(text="ไม่มีไฟล์เปิดอยู่")
             self.title("PDF Reader")
+            self.undo_btn.state(["disabled"])
+            self.redo_btn.state(["disabled"])
             return
         total = len(t.doc)
         self.page_entry.delete(0, tk.END)
@@ -1058,6 +1128,8 @@ class PDFReader(tk.Tk):
         self.zoom_lbl.config(text=f"{int(t.zoom * 100)}%")
         self.status.config(text=f"หน้า {t.page_index + 1} จาก {total} | {t.doc_path}")
         self.title(f"PDF Reader — {os.path.basename(t.doc_path)}")
+        self.undo_btn.state(["!disabled"] if t.undo_stack else ["disabled"])
+        self.redo_btn.state(["!disabled"] if t.redo_stack else ["disabled"])
 
     # ---------- Toolbar actions (delegate to active tab) ----------
     def _prev_page(self):
@@ -1301,6 +1373,26 @@ class PDFReader(tk.Tk):
             "License: MIT\n"
             "© 2026"
         )
+
+    def undo(self):
+        t = self._active_tab()
+        if not t:
+            return
+        if t.undo():
+            self.status.config(text=f"Undo ({len(t.undo_stack)} เหลือ)")
+        else:
+            self.status.config(text="ไม่มีอะไรให้ Undo")
+        self._sync_toolbar()
+
+    def redo(self):
+        t = self._active_tab()
+        if not t:
+            return
+        if t.redo():
+            self.status.config(text=f"Redo ({len(t.redo_stack)} เหลือ)")
+        else:
+            self.status.config(text="ไม่มีอะไรให้ Redo")
+        self._sync_toolbar()
 
     def _toggle_thumbnails(self):
         t = self._active_tab()
