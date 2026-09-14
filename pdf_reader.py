@@ -1282,14 +1282,23 @@ class PDFReader(tk.Tk):
         if not t:
             messagebox.showwarning("แจ้ง", "ไม่มีไฟล์เปิดอยู่")
             return
+        src_dir = os.path.dirname(t.doc_path)
+        src_name = os.path.basename(t.doc_path)
+        default_name = src_name.replace(".pdf", "_edited.pdf")
         out = filedialog.asksaveasfilename(
             defaultextension=".pdf", filetypes=[("PDF", "*.pdf")],
-            initialfile=os.path.basename(t.doc_path).replace(".pdf", "_edited.pdf"))
+            initialdir=src_dir, initialfile=default_name)
         if not out:
             return
+        # กันเขียนทับไฟล์ต้นฉบับ
+        if os.path.normcase(os.path.abspath(out)) == os.path.normcase(os.path.abspath(t.doc_path)):
+            messagebox.showwarning(
+                "แจ้ง",
+                "ไม่สามารถบันทึกทับไฟล์ต้นฉบับได้\nกรุณาตั้งชื่อไฟล์ใหม่")
+            return self.save_doc()
         try:
             t.doc.save(out, garbage=3, deflate=True)
-            messagebox.showinfo("สำเร็จ", f"บันทึกที่:\n{out}")
+            messagebox.showinfo("สำเร็จ", f"บันทึกเป็นไฟล์ใหม่ที่:\n{out}")
         except Exception as e:
             messagebox.showerror("ผิดพลาด", str(e))
 
