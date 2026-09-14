@@ -504,6 +504,69 @@ class PDFTab(ttk.Frame):
                        overlay=True)
         self.render()
 
+    # ---------- Redact (ลบข้อความ) ----------
+    def toggle_redact_mode(self):
+        self.redact_mode = not getattr(self, "redact_mode", False)
+        if self.redact_mode:
+            self._exit_other_modes(keep="redact")
+            self.canvas.config(cursor="crosshair")
+            self._rd_start = None
+            self._rd_rect_id = None
+            self.canvas.bind("<ButtonPress-1>", self._rd_press)
+            self.canvas.bind("<B1-Motion>", self._rd_motion)
+            self.canvas.bind("<ButtonRelease-1>", self._rd_release)
+        else:
+            self._rd_cleanup()
+
+    def _rd_cleanup(self):
+        self.redact_mode = False
+        self.canvas.config(cursor="")
+        self.canvas.unbind("<ButtonPress-1>")
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+
+    def _rd_press(self, e):
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        info = self._canvas_to_pdf(cx, cy)
+        if info is None:
+            return
+        p, px, py = info
+        self._rd_start = (p, px, py, cx, cy)
+
+    def _rd_motion(self, e):
+        if not self._rd_start:
+            return
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        _, _, _, scx, scy = self._rd_start
+        if self._rd_rect_id:
+            self.canvas.delete(self._rd_rect_id)
+        self._rd_rect_id = self.canvas.create_rectangle(
+            scx, scy, cx, cy, outline="#c00000", width=2, fill="#000000", stipple="gray50")
+
+    def _rd_release(self, e):
+        if not self._rd_start:
+            return
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        p, sx, sy, _, _ = self._rd_start
+        self._rd_start = None
+        if self._rd_rect_id:
+            self.canvas.delete(self._rd_rect_id)
+            self._rd_rect_id = None
+        info = self._canvas_to_pdf(cx, cy)
+        if not info or info[0] != p:
+            return
+        _, ex, ey = info
+        x0, x1 = min(sx, ex), max(sx, ex)
+        y0, y1 = min(sy, ey), max(sy, ey)
+        if (x1 - x0) < 3 or (y1 - y0) < 3:
+            return
+        page = self.doc[p]
+        # ใส่ redact annotation แล้ว apply เพื่อลบข้อความในบริเวณนั้น
+        page.add_redact_annot(fitz.Rect(x0, y0, x1, y1), fill=(1, 1, 1))
+        page.apply_redactions()
+        self.render()
+        self.render_thumbnails()
+
     # ---------- Draw (freehand) ----------
     def toggle_draw_mode(self):
         self.draw_mode = not getattr(self, "draw_mode", False)
@@ -621,6 +684,8 @@ class PDFTab(ttk.Frame):
             self._draw_commit()
         if keep != "cmt" and getattr(self, "cmt_mode", False):
             self._cmt_cleanup()
+        if keep != "redact" and getattr(self, "redact_mode", False):
+            self._rd_cleanup()
 
     def _img_release(self, e):
         if not self._img_start:
@@ -824,11 +889,12 @@ class PDFReader(tk.Tk):
     def _build_menu(self):
         menubar = tk.Menu(self)
         self._menu_labels = {
-            "sign":  "✍ เซ็นชื่อ",
-            "image": "🖼 ใส่รูป",
-            "hl":    "🖍 ไฮไลต์",
-            "draw":  "✏ ขีดเขียน",
-            "cmt":   "💬 คอมเมนต์",
+            "sign":   "✍ เซ็นชื่อ",
+            "image":  "🖼 ใส่รูป",
+            "hl":     "🖍 ไฮไลต์",
+            "draw":   "✏ ขีดเขียน",
+            "cmt":    "💬 คอมเมนต์",
+            "redact": "🗑 ลบข้อความ",
         }
         self._menu_index = {}
 
@@ -849,6 +915,8 @@ class PDFReader(tk.Tk):
         self._menu_index["draw"] = menubar.index("end")
         menubar.add_command(label=self._menu_labels["cmt"], command=self.toggle_comment_mode)
         self._menu_index["cmt"] = menubar.index("end")
+        menubar.add_command(label=self._menu_labels["redact"], command=self.toggle_redact_mode)
+        self._menu_index["redact"] = menubar.index("end")
 
         menubar.add_command(label="📑 Thumbnail", command=self._toggle_thumbnails)
         menubar.add_command(label="↺ หมุนซ้าย", command=lambda: self._rotate(-90, all_pages=False))
@@ -870,6 +938,7 @@ class PDFReader(tk.Tk):
             "hl":    bool(t and getattr(t, "hl_mode", False)),
             "draw":  bool(t and getattr(t, "draw_mode", False)),
             "cmt":   bool(t and getattr(t, "cmt_mode", False)),
+            "redact": bool(t and getattr(t, "redact_mode", False)),
         }
         # อัปเดต menu labels
         for key, is_active in modes.items():
@@ -1151,6 +1220,9 @@ class PDFReader(tk.Tk):
         elif getattr(t, "cmt_mode", False):
             t._cmt_cleanup()
             self.status.config(text="ออกจากคอมเมนต์")
+        elif getattr(t, "redact_mode", False):
+            t._rd_cleanup()
+            self.status.config(text="ออกจากลบข้อความ")
         else:
             self.attributes("-fullscreen", False)
             self.after(50, t.render)
@@ -1228,6 +1300,15 @@ class PDFReader(tk.Tk):
             return
         t.toggle_highlight_mode()
         self.status.config(text="ไฮไลต์: ลากคลุมพื้นที่ | Esc=ออก | 💾 บันทึกก่อนปิด")
+        self._update_menu_indicators()
+
+    def toggle_redact_mode(self):
+        t = self._active_tab()
+        if not t:
+            messagebox.showwarning("แจ้ง", "เปิดไฟล์ PDF ก่อน")
+            return
+        t.toggle_redact_mode()
+        self.status.config(text="ลบข้อความ: ลากคลุมข้อความที่จะลบ | Esc=ออก | 💾 บันทึกก่อนปิด")
         self._update_menu_indicators()
 
     def toggle_draw_mode(self):
