@@ -124,7 +124,79 @@ class PDFTab(ttk.Frame):
                          lambda e: self.zoom_in() if e.delta > 0 else self.zoom_out())
         self.canvas.bind("<Configure>", lambda e: self.render() if self.doc else None)
 
+        # text selection (เมื่อไม่มี mode ใดทำงาน)
+        self._sel_start = None
+        self._sel_rect_id = None
+        self._sel_text = ""
+        self._bind_selection()
+
         self.after(80, self.render_thumbnails)
+
+    def _bind_selection(self):
+        self.canvas.bind("<ButtonPress-1>", self._sel_press)
+        self.canvas.bind("<B1-Motion>", self._sel_motion)
+        self.canvas.bind("<ButtonRelease-1>", self._sel_release)
+        self.canvas.config(cursor="xterm")
+
+    def _any_mode_active(self):
+        return any(getattr(self, m, False) for m in
+                   ("sign_mode", "image_mode", "hl_mode",
+                    "draw_mode", "cmt_mode", "redact_mode"))
+
+    def _sel_press(self, e):
+        if self._any_mode_active():
+            return
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        info = self._canvas_to_pdf(cx, cy)
+        if info is None:
+            self._sel_start = None
+            return
+        p, px, py = info
+        self._sel_start = (p, px, py, cx, cy)
+        if self._sel_rect_id:
+            self.canvas.delete(self._sel_rect_id)
+            self._sel_rect_id = None
+
+    def _sel_motion(self, e):
+        if self._any_mode_active() or not self._sel_start:
+            return
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        _, _, _, scx, scy = self._sel_start
+        if self._sel_rect_id:
+            self.canvas.delete(self._sel_rect_id)
+        self._sel_rect_id = self.canvas.create_rectangle(
+            scx, scy, cx, cy, outline="#3a7bd5", width=1,
+            fill="#3a7bd5", stipple="gray25")
+
+    def _sel_release(self, e):
+        if self._any_mode_active() or not self._sel_start:
+            return
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        p, sx, sy, _, _ = self._sel_start
+        self._sel_start = None
+        info = self._canvas_to_pdf(cx, cy)
+        if not info or info[0] != p:
+            return
+        _, ex, ey = info
+        x0, x1 = min(sx, ex), max(sx, ex)
+        y0, y1 = min(sy, ey), max(sy, ey)
+        if (x1 - x0) < 3 or (y1 - y0) < 3:
+            return
+        try:
+            page = self.doc[p]
+            text = page.get_textbox(fitz.Rect(x0, y0, x1, y1))
+        except Exception:
+            text = ""
+        text = (text or "").strip()
+        self._sel_text = text
+        if text:
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(text)
+                self.app.status.config(
+                    text=f"คัดลอกแล้ว ({len(text)} ตัวอักษร) — Ctrl+V วางในโปรแกรมอื่น")
+            except Exception:
+                pass
 
     # ---------- Rendering ----------
     def render(self):
@@ -458,10 +530,10 @@ class PDFTab(ttk.Frame):
         self.sign_mode = False
         self.sign_phase = None
         self.sign_frame = None
-        self.canvas.config(cursor="")
         self.canvas.unbind("<ButtonPress-1>")
         self.canvas.unbind("<B1-Motion>")
         self.canvas.unbind("<ButtonRelease-1>")
+        self._bind_selection()
         self.render()
 
     # ---------- Insert image ----------
@@ -476,10 +548,10 @@ class PDFTab(ttk.Frame):
 
     def _img_cleanup(self):
         self.image_mode = False
-        self.canvas.config(cursor="")
         self.canvas.unbind("<ButtonPress-1>")
         self.canvas.unbind("<B1-Motion>")
         self.canvas.unbind("<ButtonRelease-1>")
+        self._bind_selection()
         if self._img_rect_id:
             self.canvas.delete(self._img_rect_id)
             self._img_rect_id = None
@@ -518,10 +590,10 @@ class PDFTab(ttk.Frame):
 
     def _hl_cleanup(self):
         self.hl_mode = False
-        self.canvas.config(cursor="")
         self.canvas.unbind("<ButtonPress-1>")
         self.canvas.unbind("<B1-Motion>")
         self.canvas.unbind("<ButtonRelease-1>")
+        self._bind_selection()
 
     def _hl_press(self, e):
         cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
@@ -582,10 +654,10 @@ class PDFTab(ttk.Frame):
 
     def _rd_cleanup(self):
         self.redact_mode = False
-        self.canvas.config(cursor="")
         self.canvas.unbind("<ButtonPress-1>")
         self.canvas.unbind("<B1-Motion>")
         self.canvas.unbind("<ButtonRelease-1>")
+        self._bind_selection()
 
     def _rd_press(self, e):
         cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
@@ -658,10 +730,10 @@ class PDFTab(ttk.Frame):
             self._draw_strokes = []
             self.dirty = True
         self.draw_mode = False
-        self.canvas.config(cursor="")
         self.canvas.unbind("<ButtonPress-1>")
         self.canvas.unbind("<B1-Motion>")
         self.canvas.unbind("<ButtonRelease-1>")
+        self._bind_selection()
         self.render()
 
     def _draw_press(self, e):
@@ -704,8 +776,8 @@ class PDFTab(ttk.Frame):
 
     def _cmt_cleanup(self):
         self.cmt_mode = False
-        self.canvas.config(cursor="")
         self.canvas.unbind("<ButtonPress-1>")
+        self._bind_selection()
 
     def _cmt_click(self, e):
         cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
