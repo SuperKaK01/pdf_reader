@@ -125,11 +125,12 @@ class PDFTab(ttk.Frame):
         self.canvas.bind("<Configure>", lambda e: self.render() if self.doc else None)
 
         # text selection (เมื่อไม่มี mode ใดทำงาน)
-        self._sel_start = None       # (page, word_idx)
+        self._sel_start = None       # (page, char_idx)
         self._sel_end = None
         self._sel_highlight_ids = []
         self._sel_text = ""
-        self._words_cache = {}
+        self._chars_cache = {}
+        self._words_cache = {}       # legacy (ยังเผื่อไว้)
         self._bind_selection()
 
         self.after(80, self.render_thumbnails)
@@ -138,6 +139,7 @@ class PDFTab(ttk.Frame):
         self.canvas.bind("<ButtonPress-1>", self._sel_press)
         self.canvas.bind("<B1-Motion>", self._sel_motion)
         self.canvas.bind("<ButtonRelease-1>", self._sel_release)
+        self.canvas.bind("<Button-3>", self._sel_context_menu)
         self.canvas.config(cursor="xterm")
 
     def _any_mode_active(self):
@@ -145,37 +147,48 @@ class PDFTab(ttk.Frame):
                    ("sign_mode", "image_mode", "hl_mode",
                     "draw_mode", "cmt_mode", "redact_mode"))
 
-    def _get_words(self, page_idx):
-        if page_idx not in self._words_cache:
-            try:
-                self._words_cache[page_idx] = self.doc[page_idx].get_text("words")
-            except Exception:
-                self._words_cache[page_idx] = []
-        return self._words_cache[page_idx]
+    def _get_chars(self, page_idx):
+        """คืน list [(bbox, char, block, line), ...] เรียงตามลำดับการอ่าน"""
+        if page_idx in self._chars_cache:
+            return self._chars_cache[page_idx]
+        chars = []
+        try:
+            d = self.doc[page_idx].get_text("rawdict")
+        except Exception:
+            d = {"blocks": []}
+        for b_idx, block in enumerate(d.get("blocks", [])):
+            if block.get("type", 1) != 0:  # ข้ามรูป
+                continue
+            for l_idx, line in enumerate(block.get("lines", [])):
+                for span in line.get("spans", []):
+                    for ch in span.get("chars", []):
+                        bbox = ch.get("bbox")
+                        c = ch.get("c", "")
+                        if bbox and c:
+                            chars.append((bbox, c, b_idx, l_idx))
+        self._chars_cache[page_idx] = chars
+        return chars
 
-    def _word_index_at(self, page_idx, x, y):
-        """หา index ของคำที่ใกล้จุด (x,y) ใน PDF coord (คำในบรรทัดเดียวกันมีน้ำหนักมากกว่า)"""
-        words = self._get_words(page_idx)
-        if not words:
+    def _char_index_at(self, page_idx, x, y):
+        chars = self._get_chars(page_idx)
+        if not chars:
             return None
-        # ถ้าอยู่ในกล่องคำ → เอาคำนั้น
-        for i, w in enumerate(words):
-            x0, y0, x1, y1 = w[:4]
+        for i, (bbox, _, _, _) in enumerate(chars):
+            x0, y0, x1, y1 = bbox
             if x0 <= x <= x1 and y0 <= y <= y1:
                 return i
-        # หาคำที่บรรทัดครอบ y ก่อน
-        candidates = [i for i, w in enumerate(words) if w[1] <= y <= w[3]]
-        if candidates:
-            return min(candidates, key=lambda i: abs((words[i][0] + words[i][2]) / 2 - x))
-        # ไม่งั้นหาคำใกล้สุด (ให้ y ห่างมีน้ำหนักมากกว่า)
-        best_i, best_d = None, float("inf")
-        for i, w in enumerate(words):
-            cx = (w[0] + w[2]) / 2
-            cy = (w[1] + w[3]) / 2
+        # หาบรรทัดที่ครอบ y ก่อน แล้วเลือกตัวใกล้ x
+        line_cands = [i for i, (bb, _, _, _) in enumerate(chars) if bb[1] <= y <= bb[3]]
+        if line_cands:
+            return min(line_cands, key=lambda i: abs((chars[i][0][0] + chars[i][0][2]) / 2 - x))
+        best, best_d = None, float("inf")
+        for i, (bbox, _, _, _) in enumerate(chars):
+            cx = (bbox[0] + bbox[2]) / 2
+            cy = (bbox[1] + bbox[3]) / 2
             d = (x - cx) ** 2 + ((y - cy) * 3) ** 2
             if d < best_d:
-                best_d, best_i = d, i
-        return best_i
+                best_d, best = d, i
+        return best
 
     def _clear_sel_highlight(self):
         for hid in self._sel_highlight_ids:
@@ -183,48 +196,58 @@ class PDFTab(ttk.Frame):
         self._sel_highlight_ids = []
 
     def _draw_sel_highlight(self, page_idx, i0, i1):
-        """วาดกล่องสีน้ำเงินคลุมคำจาก index i0..i1 (inclusive) บน canvas"""
+        """วาดสีน้ำเงินคลุมช่วง char index i0..i1 — รวมช่วงในบรรทัดเดียวเป็น rect เดียว"""
         self._clear_sel_highlight()
-        words = self._get_words(page_idx)
-        if not words:
+        chars = self._get_chars(page_idx)
+        if not chars or page_idx >= len(self.page_offsets):
             return
         lo, hi = min(i0, i1), max(i0, i1)
-        # หา canvas offset ของหน้านั้น
-        if page_idx >= len(self.page_offsets):
-            return
         page_y_top, _ = self.page_offsets[page_idx]
         cw = self.canvas.winfo_width() or 900
-        page = self.doc[page_idx]
-        page_w_px = page.rect.width * self.zoom
+        page_w_px = self.doc[page_idx].rect.width * self.zoom
         offset_x = max((cw - page_w_px) // 2, 0)
-        for w in words[lo:hi + 1]:
-            x0, y0, x1, y1 = w[:4]
-            cx0 = x0 * self.zoom + offset_x
-            cy0 = y0 * self.zoom + page_y_top
-            cx1 = x1 * self.zoom + offset_x
-            cy1 = y1 * self.zoom + page_y_top
-            hid = self.canvas.create_rectangle(
-                cx0, cy0, cx1, cy1, outline="",
-                fill="#3a7bd5", stipple="gray50")
-            self._sel_highlight_ids.append(hid)
+        # รวมเป็นช่วงตามบรรทัด
+        run = None  # [x0,y0,x1,y1]
+        prev_line = None
+        for i in range(lo, hi + 1):
+            bbox, _, b, l = chars[i]
+            key = (b, l)
+            if run and key == prev_line:
+                run[0] = min(run[0], bbox[0])
+                run[1] = min(run[1], bbox[1])
+                run[2] = max(run[2], bbox[2])
+                run[3] = max(run[3], bbox[3])
+            else:
+                if run:
+                    self._flush_sel_rect(run, page_y_top, offset_x)
+                run = list(bbox)
+                prev_line = key
+        if run:
+            self._flush_sel_rect(run, page_y_top, offset_x)
+
+    def _flush_sel_rect(self, r, page_y_top, offset_x):
+        cx0 = r[0] * self.zoom + offset_x
+        cy0 = r[1] * self.zoom + page_y_top
+        cx1 = r[2] * self.zoom + offset_x
+        cy1 = r[3] * self.zoom + page_y_top
+        hid = self.canvas.create_rectangle(
+            cx0, cy0, cx1, cy1, outline="",
+            fill="#3a7bd5", stipple="gray50")
+        self._sel_highlight_ids.append(hid)
 
     def _selected_text(self, page_idx, i0, i1):
-        words = self._get_words(page_idx)
-        if not words:
+        chars = self._get_chars(page_idx)
+        if not chars:
             return ""
         lo, hi = min(i0, i1), max(i0, i1)
         parts = []
         prev_line = None
-        for w in words[lo:hi + 1]:
-            text = w[4]
-            block_no = w[5]
-            line_no = w[6]
-            key = (block_no, line_no)
+        for i in range(lo, hi + 1):
+            _, c, b, l = chars[i]
+            key = (b, l)
             if prev_line is not None and key != prev_line:
                 parts.append("\n")
-            elif parts:
-                parts.append(" ")
-            parts.append(text)
+            parts.append(c)
             prev_line = key
         return "".join(parts).strip()
 
@@ -238,7 +261,7 @@ class PDFTab(ttk.Frame):
             self._sel_start = None
             return
         p, px, py = info
-        idx = self._word_index_at(p, px, py)
+        idx = self._char_index_at(p, px, py)
         if idx is None:
             self._sel_start = None
             return
@@ -253,10 +276,9 @@ class PDFTab(ttk.Frame):
         if not info:
             return
         p, px, py = info
-        # เลือกได้เฉพาะภายในหน้าเดียวกันก่อน (Adobe-like)
         if p != self._sel_start[0]:
             return
-        idx = self._word_index_at(p, px, py)
+        idx = self._char_index_at(p, px, py)
         if idx is None:
             return
         self._sel_end = (p, idx)
@@ -277,6 +299,48 @@ class PDFTab(ttk.Frame):
                     text=f"คัดลอกแล้ว ({len(text)} ตัวอักษร) — Ctrl+V วางที่อื่นได้")
             except Exception:
                 pass
+
+    def _sel_context_menu(self, e):
+        if self._any_mode_active():
+            return
+        m = tk.Menu(self.canvas, tearoff=0)
+        has_sel = bool(self._sel_text)
+        m.add_command(label="📋 คัดลอก", state=("normal" if has_sel else "disabled"),
+                      command=self._copy_selection)
+        m.add_command(label="เลือกทั้งหน้า", command=self._select_current_page)
+        m.add_separator()
+        m.add_command(label="ล้างการเลือก", command=self._clear_selection)
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def _copy_selection(self):
+        if not self._sel_text:
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self._sel_text)
+            self.app.status.config(text=f"คัดลอกแล้ว ({len(self._sel_text)} ตัวอักษร)")
+        except Exception:
+            pass
+
+    def _select_current_page(self):
+        p = self.page_index
+        chars = self._get_chars(p)
+        if not chars:
+            return
+        self._sel_start = (p, 0)
+        self._sel_end = (p, len(chars) - 1)
+        self._draw_sel_highlight(p, 0, len(chars) - 1)
+        self._sel_text = self._selected_text(p, 0, len(chars) - 1)
+        self._copy_selection()
+
+    def _clear_selection(self):
+        self._clear_sel_highlight()
+        self._sel_start = None
+        self._sel_end = None
+        self._sel_text = ""
 
     # ---------- Rendering ----------
     def render(self):
@@ -338,6 +402,7 @@ class PDFTab(ttk.Frame):
         self.doc = fitz.open(stream=data, filetype="pdf")
         self.page_index = min(cur_page, len(self.doc) - 1)
         self._words_cache = {}
+        self._chars_cache = {}
         self.render()
         self.render_thumbnails()
 
@@ -375,6 +440,7 @@ class PDFTab(ttk.Frame):
         page = self.doc[self.page_index]
         page.set_rotation((page.rotation + delta) % 360)
         self._words_cache.pop(self.page_index, None)
+        self._chars_cache.pop(self.page_index, None)
         self.dirty = True
         self.render()
         self.render_thumbnails()
@@ -386,6 +452,7 @@ class PDFTab(ttk.Frame):
         for p in self.doc:
             p.set_rotation((p.rotation + delta) % 360)
         self._words_cache = {}
+        self._chars_cache = {}
         self.dirty = True
         self.render()
         self.render_thumbnails()
