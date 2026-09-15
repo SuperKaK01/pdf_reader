@@ -125,9 +125,11 @@ class PDFTab(ttk.Frame):
         self.canvas.bind("<Configure>", lambda e: self.render() if self.doc else None)
 
         # text selection (เมื่อไม่มี mode ใดทำงาน)
-        self._sel_start = None
-        self._sel_rect_id = None
+        self._sel_start = None       # (page, word_idx)
+        self._sel_end = None
+        self._sel_highlight_ids = []
         self._sel_text = ""
+        self._words_cache = {}
         self._bind_selection()
 
         self.after(80, self.render_thumbnails)
@@ -143,7 +145,91 @@ class PDFTab(ttk.Frame):
                    ("sign_mode", "image_mode", "hl_mode",
                     "draw_mode", "cmt_mode", "redact_mode"))
 
+    def _get_words(self, page_idx):
+        if page_idx not in self._words_cache:
+            try:
+                self._words_cache[page_idx] = self.doc[page_idx].get_text("words")
+            except Exception:
+                self._words_cache[page_idx] = []
+        return self._words_cache[page_idx]
+
+    def _word_index_at(self, page_idx, x, y):
+        """หา index ของคำที่ใกล้จุด (x,y) ใน PDF coord (คำในบรรทัดเดียวกันมีน้ำหนักมากกว่า)"""
+        words = self._get_words(page_idx)
+        if not words:
+            return None
+        # ถ้าอยู่ในกล่องคำ → เอาคำนั้น
+        for i, w in enumerate(words):
+            x0, y0, x1, y1 = w[:4]
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return i
+        # หาคำที่บรรทัดครอบ y ก่อน
+        candidates = [i for i, w in enumerate(words) if w[1] <= y <= w[3]]
+        if candidates:
+            return min(candidates, key=lambda i: abs((words[i][0] + words[i][2]) / 2 - x))
+        # ไม่งั้นหาคำใกล้สุด (ให้ y ห่างมีน้ำหนักมากกว่า)
+        best_i, best_d = None, float("inf")
+        for i, w in enumerate(words):
+            cx = (w[0] + w[2]) / 2
+            cy = (w[1] + w[3]) / 2
+            d = (x - cx) ** 2 + ((y - cy) * 3) ** 2
+            if d < best_d:
+                best_d, best_i = d, i
+        return best_i
+
+    def _clear_sel_highlight(self):
+        for hid in self._sel_highlight_ids:
+            self.canvas.delete(hid)
+        self._sel_highlight_ids = []
+
+    def _draw_sel_highlight(self, page_idx, i0, i1):
+        """วาดกล่องสีน้ำเงินคลุมคำจาก index i0..i1 (inclusive) บน canvas"""
+        self._clear_sel_highlight()
+        words = self._get_words(page_idx)
+        if not words:
+            return
+        lo, hi = min(i0, i1), max(i0, i1)
+        # หา canvas offset ของหน้านั้น
+        if page_idx >= len(self.page_offsets):
+            return
+        page_y_top, _ = self.page_offsets[page_idx]
+        cw = self.canvas.winfo_width() or 900
+        page = self.doc[page_idx]
+        page_w_px = page.rect.width * self.zoom
+        offset_x = max((cw - page_w_px) // 2, 0)
+        for w in words[lo:hi + 1]:
+            x0, y0, x1, y1 = w[:4]
+            cx0 = x0 * self.zoom + offset_x
+            cy0 = y0 * self.zoom + page_y_top
+            cx1 = x1 * self.zoom + offset_x
+            cy1 = y1 * self.zoom + page_y_top
+            hid = self.canvas.create_rectangle(
+                cx0, cy0, cx1, cy1, outline="",
+                fill="#3a7bd5", stipple="gray50")
+            self._sel_highlight_ids.append(hid)
+
+    def _selected_text(self, page_idx, i0, i1):
+        words = self._get_words(page_idx)
+        if not words:
+            return ""
+        lo, hi = min(i0, i1), max(i0, i1)
+        parts = []
+        prev_line = None
+        for w in words[lo:hi + 1]:
+            text = w[4]
+            block_no = w[5]
+            line_no = w[6]
+            key = (block_no, line_no)
+            if prev_line is not None and key != prev_line:
+                parts.append("\n")
+            elif parts:
+                parts.append(" ")
+            parts.append(text)
+            prev_line = key
+        return "".join(parts).strip()
+
     def _sel_press(self, e):
+        self._clear_sel_highlight()
         if self._any_mode_active():
             return
         cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
@@ -152,49 +238,43 @@ class PDFTab(ttk.Frame):
             self._sel_start = None
             return
         p, px, py = info
-        self._sel_start = (p, px, py, cx, cy)
-        if self._sel_rect_id:
-            self.canvas.delete(self._sel_rect_id)
-            self._sel_rect_id = None
+        idx = self._word_index_at(p, px, py)
+        if idx is None:
+            self._sel_start = None
+            return
+        self._sel_start = (p, idx)
+        self._sel_end = (p, idx)
 
     def _sel_motion(self, e):
         if self._any_mode_active() or not self._sel_start:
             return
         cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
-        _, _, _, scx, scy = self._sel_start
-        if self._sel_rect_id:
-            self.canvas.delete(self._sel_rect_id)
-        self._sel_rect_id = self.canvas.create_rectangle(
-            scx, scy, cx, cy, outline="#3a7bd5", width=1,
-            fill="#3a7bd5", stipple="gray25")
+        info = self._canvas_to_pdf(cx, cy)
+        if not info:
+            return
+        p, px, py = info
+        # เลือกได้เฉพาะภายในหน้าเดียวกันก่อน (Adobe-like)
+        if p != self._sel_start[0]:
+            return
+        idx = self._word_index_at(p, px, py)
+        if idx is None:
+            return
+        self._sel_end = (p, idx)
+        self._draw_sel_highlight(p, self._sel_start[1], idx)
 
     def _sel_release(self, e):
-        if self._any_mode_active() or not self._sel_start:
+        if self._any_mode_active() or not self._sel_start or not self._sel_end:
             return
-        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
-        p, sx, sy, _, _ = self._sel_start
-        self._sel_start = None
-        info = self._canvas_to_pdf(cx, cy)
-        if not info or info[0] != p:
-            return
-        _, ex, ey = info
-        x0, x1 = min(sx, ex), max(sx, ex)
-        y0, y1 = min(sy, ey), max(sy, ey)
-        if (x1 - x0) < 3 or (y1 - y0) < 3:
-            return
-        try:
-            page = self.doc[p]
-            text = page.get_textbox(fitz.Rect(x0, y0, x1, y1))
-        except Exception:
-            text = ""
-        text = (text or "").strip()
+        p, i0 = self._sel_start
+        _, i1 = self._sel_end
+        text = self._selected_text(p, i0, i1)
         self._sel_text = text
         if text:
             try:
                 self.clipboard_clear()
                 self.clipboard_append(text)
                 self.app.status.config(
-                    text=f"คัดลอกแล้ว ({len(text)} ตัวอักษร) — Ctrl+V วางในโปรแกรมอื่น")
+                    text=f"คัดลอกแล้ว ({len(text)} ตัวอักษร) — Ctrl+V วางที่อื่นได้")
             except Exception:
                 pass
 
@@ -205,6 +285,7 @@ class PDFTab(ttk.Frame):
         self.canvas.delete("all")
         self.photos = []
         self.page_offsets = []
+        self._sel_highlight_ids = []
 
         cw = self.canvas.winfo_width() or 900
         mat = fitz.Matrix(self.zoom, self.zoom)
@@ -256,6 +337,7 @@ class PDFTab(ttk.Frame):
             pass
         self.doc = fitz.open(stream=data, filetype="pdf")
         self.page_index = min(cur_page, len(self.doc) - 1)
+        self._words_cache = {}
         self.render()
         self.render_thumbnails()
 
@@ -292,6 +374,7 @@ class PDFTab(ttk.Frame):
         self._snapshot()
         page = self.doc[self.page_index]
         page.set_rotation((page.rotation + delta) % 360)
+        self._words_cache.pop(self.page_index, None)
         self.dirty = True
         self.render()
         self.render_thumbnails()
@@ -302,6 +385,7 @@ class PDFTab(ttk.Frame):
         self._snapshot()
         for p in self.doc:
             p.set_rotation((p.rotation + delta) % 360)
+        self._words_cache = {}
         self.dirty = True
         self.render()
         self.render_thumbnails()
