@@ -1171,6 +1171,7 @@ class PDFReader(tk.Tk):
         super().__init__()
         self.title("PDF Reader")
         self.geometry("1100x780")
+        self._set_app_icon()
 
         self.tabs = []  # list of PDFTab
 
@@ -1579,11 +1580,50 @@ class PDFReader(tk.Tk):
         if not t:
             messagebox.showwarning("แจ้ง", "เปิดไฟล์ PDF ก่อน")
             return
+        path = t.doc_path
+        # ลอง Print verb ก่อน
         try:
-            os.startfile(t.doc_path, "print")
+            os.startfile(path, "print")
             self.status.config(text="ส่งไปยังเครื่องพิมพ์แล้ว")
-        except Exception as e:
-            messagebox.showerror("ผิดพลาด", f"พิมพ์ไม่ได้: {e}")
+            return
+        except OSError:
+            pass
+        # Fallback: เปิดใน Microsoft Edge เพื่อให้ผู้ใช้กด Ctrl+P
+        edge_paths = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ]
+        for edge in edge_paths:
+            if os.path.isfile(edge):
+                try:
+                    import subprocess
+                    subprocess.Popen([edge, path])
+                    self.status.config(text="เปิดใน Edge แล้ว — กด Ctrl+P เพื่อพิมพ์")
+                    messagebox.showinfo(
+                        "พิมพ์ผ่านเบราว์เซอร์",
+                        "เปิดไฟล์ใน Microsoft Edge แล้ว\n"
+                        "กด Ctrl+P ในหน้าต่างนั้นเพื่อพิมพ์")
+                    return
+                except Exception:
+                    pass
+        messagebox.showerror(
+            "พิมพ์ไม่ได้",
+            "โปรแกรมเริ่มต้นสำหรับ PDF ไม่รองรับการสั่งพิมพ์โดยตรง\n\n"
+            "วิธีแก้:\n"
+            "1. เปลี่ยน default PDF ไปเป็น Edge หรือ Adobe Reader\n"
+            "   (Settings → Apps → Default apps → .pdf)\n"
+            "2. หรือคลิกขวาที่ไฟล์ → Open with → เลือกโปรแกรมที่พิมพ์ได้")
+
+    def _set_app_icon(self):
+        # หา icon.ico ทั้งใน dev และตอน build เป็น exe
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        for name in ("icon.ico", os.path.join(base, "icon.ico")):
+            if os.path.isfile(name):
+                try:
+                    self.iconbitmap(name)
+                    return
+                except Exception:
+                    pass
 
     def _show_about(self):
         messagebox.showinfo(
