@@ -110,6 +110,7 @@ class PDFTab(ttk.Frame):
         self.thumb_canvas.bind("<MouseWheel>",
                                lambda e: self.thumb_canvas.yview_scroll(int(-e.delta / 120), "units"))
         self.thumb_canvas.bind("<Button-1>", self._on_thumb_click)
+        self.thumb_canvas.bind("<Button-3>", self._on_thumb_right_click)
 
         # ===== Main canvas + scrollbars (ขวา) =====
         main_frame = ttk.Frame(self)
@@ -615,6 +616,46 @@ class PDFTab(ttk.Frame):
             if y_top <= y <= y_bot:
                 self.go_to_page(i)
                 return
+
+    def _on_thumb_right_click(self, event):
+        y = self.thumb_canvas.canvasy(event.y)
+        target = None
+        for _, i, y_top, y_bot in self.thumb_items:
+            if y_top <= y <= y_bot:
+                target = i
+                break
+        if target is None:
+            return
+        m = tk.Menu(self.thumb_canvas, tearoff=0)
+        m.add_command(label=f"ลบหน้านี้ (หน้า {target + 1})",
+                      command=lambda: self.delete_page(target))
+        m.add_separator()
+        m.add_command(label="ไปที่หน้านี้", command=lambda: self.go_to_page(target))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def delete_page(self, idx):
+        if not self.doc or not (0 <= idx < len(self.doc)):
+            return
+        if len(self.doc) <= 1:
+            messagebox.showwarning("แจ้ง", "ลบไม่ได้ — PDF ต้องมีอย่างน้อย 1 หน้า")
+            return
+        ok = messagebox.askyesno(
+            "ยืนยัน", f"ลบหน้าที่ {idx + 1} ออกจากเอกสาร?\n(กด Ctrl+Z เพื่อ undo ได้)")
+        if not ok:
+            return
+        self._snapshot()
+        self.doc.delete_page(idx)
+        self._chars_cache = {}
+        self._words_cache = {}
+        if self.page_index >= len(self.doc):
+            self.page_index = len(self.doc) - 1
+        self.dirty = True
+        self.render()
+        self.render_thumbnails()
+        self.app.status.config(text=f"ลบหน้าที่ {idx + 1} แล้ว — 💾 บันทึกก่อนปิด")
 
     # ---------- Navigation ----------
     def next_page(self):
