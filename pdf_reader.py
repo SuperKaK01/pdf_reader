@@ -195,19 +195,31 @@ class PDFTab(ttk.Frame):
             self.canvas.delete(hid)
         self._sel_highlight_ids = []
 
-    def _draw_sel_highlight(self, page_idx, i0, i1):
-        """วาดสีน้ำเงินคลุมช่วง char index i0..i1 — รวมช่วงในบรรทัดเดียวเป็น rect เดียว"""
+    def _draw_sel_highlight(self, start, end):
+        """วาด highlight จาก (page_a, i_a) ถึง (page_b, i_b) — รองรับหลายหน้า"""
         self._clear_sel_highlight()
-        chars = self._get_chars(page_idx)
-        if not chars or page_idx >= len(self.page_offsets):
+        if start is None or end is None:
             return
-        lo, hi = min(i0, i1), max(i0, i1)
+        pa, ia = start
+        pb, ib = end
+        if pa > pb or (pa == pb and ia > ib):
+            pa, pb = pb, pa
+            ia, ib = ib, ia
+        for p in range(pa, pb + 1):
+            chars = self._get_chars(p)
+            if not chars or p >= len(self.page_offsets):
+                continue
+            lo = ia if p == pa else 0
+            hi = ib if p == pb else len(chars) - 1
+            self._draw_page_highlight(p, lo, hi)
+
+    def _draw_page_highlight(self, page_idx, lo, hi):
+        chars = self._get_chars(page_idx)
         page_y_top, _ = self.page_offsets[page_idx]
         cw = self.canvas.winfo_width() or 900
         page_w_px = self.doc[page_idx].rect.width * self.zoom
         offset_x = max((cw - page_w_px) // 2, 0)
-        # รวมเป็นช่วงตามบรรทัด
-        run = None  # [x0,y0,x1,y1]
+        run = None
         prev_line = None
         for i in range(lo, hi + 1):
             bbox, _, b, l = chars[i]
@@ -235,21 +247,32 @@ class PDFTab(ttk.Frame):
             fill="#3a7bd5", stipple="gray50")
         self._sel_highlight_ids.append(hid)
 
-    def _selected_text(self, page_idx, i0, i1):
-        chars = self._get_chars(page_idx)
-        if not chars:
+    def _selected_text(self, start, end):
+        if start is None or end is None:
             return ""
-        lo, hi = min(i0, i1), max(i0, i1)
-        parts = []
-        prev_line = None
-        for i in range(lo, hi + 1):
-            _, c, b, l = chars[i]
-            key = (b, l)
-            if prev_line is not None and key != prev_line:
-                parts.append("\n")
-            parts.append(c)
-            prev_line = key
-        return "".join(parts).strip()
+        pa, ia = start
+        pb, ib = end
+        if pa > pb or (pa == pb and ia > ib):
+            pa, pb = pb, pa
+            ia, ib = ib, ia
+        out = []
+        for p in range(pa, pb + 1):
+            chars = self._get_chars(p)
+            if not chars:
+                continue
+            lo = ia if p == pa else 0
+            hi = ib if p == pb else len(chars) - 1
+            parts = []
+            prev_line = None
+            for i in range(lo, hi + 1):
+                _, c, b, l = chars[i]
+                key = (b, l)
+                if prev_line is not None and key != prev_line:
+                    parts.append("\n")
+                parts.append(c)
+                prev_line = key
+            out.append("".join(parts))
+        return "\n\n".join(out).strip()
 
     def _sel_press(self, e):
         self._clear_sel_highlight()
@@ -276,20 +299,16 @@ class PDFTab(ttk.Frame):
         if not info:
             return
         p, px, py = info
-        if p != self._sel_start[0]:
-            return
         idx = self._char_index_at(p, px, py)
         if idx is None:
             return
         self._sel_end = (p, idx)
-        self._draw_sel_highlight(p, self._sel_start[1], idx)
+        self._draw_sel_highlight(self._sel_start, self._sel_end)
 
     def _sel_release(self, e):
         if self._any_mode_active() or not self._sel_start or not self._sel_end:
             return
-        p, i0 = self._sel_start
-        _, i1 = self._sel_end
-        text = self._selected_text(p, i0, i1)
+        text = self._selected_text(self._sel_start, self._sel_end)
         self._sel_text = text
         if text:
             try:
@@ -332,8 +351,8 @@ class PDFTab(ttk.Frame):
             return
         self._sel_start = (p, 0)
         self._sel_end = (p, len(chars) - 1)
-        self._draw_sel_highlight(p, 0, len(chars) - 1)
-        self._sel_text = self._selected_text(p, 0, len(chars) - 1)
+        self._draw_sel_highlight(self._sel_start, self._sel_end)
+        self._sel_text = self._selected_text(self._sel_start, self._sel_end)
         self._copy_selection()
 
     def _clear_selection(self):
@@ -789,6 +808,96 @@ class PDFTab(ttk.Frame):
         self.dirty = True
         self.render()
 
+    # ---------- Form fill (fillable PDF) ----------
+    def has_form(self):
+        try:
+            for p in range(len(self.doc)):
+                if any(True for _ in self.doc[p].widgets()):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def toggle_form_mode(self):
+        self.form_mode = not getattr(self, "form_mode", False)
+        if self.form_mode:
+            self._exit_other_modes(keep="form")
+            if not self.has_form():
+                self.form_mode = False
+                messagebox.showinfo("ฟอร์ม", "PDF นี้ไม่มี form field ให้กรอก")
+                return
+            self.canvas.config(cursor="hand2")
+            self.canvas.bind("<ButtonPress-1>", self._form_click)
+            self._render_form_overlays()
+        else:
+            self._form_cleanup()
+
+    def _form_cleanup(self):
+        self.form_mode = False
+        self.canvas.unbind("<ButtonPress-1>")
+        self._bind_selection()
+        self.render()
+
+    def _render_form_overlays(self):
+        """วาดกรอบสีเหลืองรอบทุก widget เพื่อให้เห็นว่าตรงไหนกรอกได้"""
+        cw = self.canvas.winfo_width() or 900
+        for p in range(len(self.doc)):
+            page = self.doc[p]
+            page_y_top, _ = self.page_offsets[p]
+            page_w_px = page.rect.width * self.zoom
+            offset_x = max((cw - page_w_px) // 2, 0)
+            for w in page.widgets():
+                r = w.rect
+                cx0 = r.x0 * self.zoom + offset_x
+                cy0 = r.y0 * self.zoom + page_y_top
+                cx1 = r.x1 * self.zoom + offset_x
+                cy1 = r.y1 * self.zoom + page_y_top
+                self.canvas.create_rectangle(
+                    cx0, cy0, cx1, cy1,
+                    outline="#e6a800", width=2, dash=(4, 3))
+
+    def _form_click(self, e):
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        info = self._canvas_to_pdf(cx, cy)
+        if not info:
+            return
+        p, px, py = info
+        page = self.doc[p]
+        for w in page.widgets():
+            r = w.rect
+            if r.x0 <= px <= r.x1 and r.y0 <= py <= r.y1:
+                self._edit_widget(w, page)
+                return
+
+    def _edit_widget(self, w, page):
+        wtype = w.field_type
+        # 2 = TEXT, 3 = LISTBOX, 4 = COMBOBOX, 5 = CHECKBOX, 6 = RADIO
+        if wtype == 5:  # checkbox
+            self._snapshot()
+            new_val = "Off" if w.field_value in (True, "Yes", "On") else "Yes"
+            w.field_value = new_val
+            w.update()
+            self.dirty = True
+            self.render()
+            self._render_form_overlays()
+        elif wtype in (2, 4):  # text or combobox
+            from tkinter import simpledialog
+            cur = w.field_value or ""
+            new = simpledialog.askstring(
+                "กรอกข้อมูล",
+                f"ฟิลด์: {w.field_name or '(ไม่มีชื่อ)'}",
+                initialvalue=str(cur))
+            if new is None:
+                return
+            self._snapshot()
+            w.field_value = new
+            w.update()
+            self.dirty = True
+            self.render()
+            self._render_form_overlays()
+        else:
+            messagebox.showinfo("แจ้ง", f"ยังไม่รองรับ field type: {wtype}")
+
     # ---------- Redact (ลบข้อความ) ----------
     def toggle_redact_mode(self):
         self.redact_mode = not getattr(self, "redact_mode", False)
@@ -977,6 +1086,8 @@ class PDFTab(ttk.Frame):
             self._cmt_cleanup()
         if keep != "redact" and getattr(self, "redact_mode", False):
             self._rd_cleanup()
+        if keep != "form" and getattr(self, "form_mode", False):
+            self._form_cleanup()
 
     def _img_release(self, e):
         if not self._img_start:
@@ -1192,6 +1303,7 @@ class PDFReader(tk.Tk):
             "draw":   "✏ ขีดเขียน",
             "cmt":    "💬 คอมเมนต์",
             "redact": "🗑 ลบข้อความ",
+            "form":   "📝 กรอกฟอร์ม",
         }
         self._menu_index = {}
 
@@ -1214,6 +1326,8 @@ class PDFReader(tk.Tk):
         self._menu_index["cmt"] = menubar.index("end")
         menubar.add_command(label=self._menu_labels["redact"], command=self.toggle_redact_mode)
         self._menu_index["redact"] = menubar.index("end")
+        menubar.add_command(label=self._menu_labels["form"], command=self.toggle_form_mode)
+        self._menu_index["form"] = menubar.index("end")
 
         menubar.add_command(label="📑 Thumbnail", command=self._toggle_thumbnails)
         menubar.add_command(label="↺ หมุนซ้าย", command=lambda: self._rotate(-90, all_pages=False))
@@ -1236,6 +1350,7 @@ class PDFReader(tk.Tk):
             "draw":  bool(t and getattr(t, "draw_mode", False)),
             "cmt":   bool(t and getattr(t, "cmt_mode", False)),
             "redact": bool(t and getattr(t, "redact_mode", False)),
+            "form":   bool(t and getattr(t, "form_mode", False)),
         }
         # อัปเดต menu labels
         for key, is_active in modes.items():
@@ -1562,6 +1677,9 @@ class PDFReader(tk.Tk):
         elif getattr(t, "redact_mode", False):
             t._rd_cleanup()
             self.status.config(text="ออกจากลบข้อความ")
+        elif getattr(t, "form_mode", False):
+            t._form_cleanup()
+            self.status.config(text="ออกจากกรอกฟอร์ม")
         else:
             self.attributes("-fullscreen", False)
             self.after(50, t.render)
@@ -1719,6 +1837,16 @@ class PDFReader(tk.Tk):
             return
         t.toggle_redact_mode()
         self.status.config(text="ลบข้อความ: ลากคลุมข้อความที่จะลบ | Esc=ออก | 💾 บันทึกก่อนปิด")
+        self._update_menu_indicators()
+
+    def toggle_form_mode(self):
+        t = self._active_tab()
+        if not t:
+            messagebox.showwarning("แจ้ง", "เปิดไฟล์ PDF ก่อน")
+            return
+        t.toggle_form_mode()
+        if getattr(t, "form_mode", False):
+            self.status.config(text="กรอกฟอร์ม: คลิกที่กรอบเหลืองเพื่อกรอก/ติ๊ก | Esc=ออก | 💾 บันทึก")
         self._update_menu_indicators()
 
     def toggle_draw_mode(self):
