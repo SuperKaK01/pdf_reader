@@ -1418,7 +1418,8 @@ class PDFReader(tk.Tk):
 
     # ---------- UI ----------
     def _build_menu(self):
-        menubar = tk.Menu(self)
+        menu_font = ("Segoe UI", 12)
+        menubar = tk.Menu(self, font=menu_font)
         self._menu_labels = {
             "sign":   "✍ เซ็นชื่อ",
             "image":  "🖼 ใส่รูป",
