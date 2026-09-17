@@ -5,7 +5,7 @@ a = Analysis(
     ['pdf_reader.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')],
+    datas=[('icon.ico', '.'), ('qr_feedback.png', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

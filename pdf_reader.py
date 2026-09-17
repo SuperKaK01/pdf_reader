@@ -12,6 +12,10 @@ distributed under AGPL-3.0.
 import os
 import sys
 import subprocess
+import webbrowser
+
+# แก้ตรงนี้เมื่อได้ URL Google Form จริง (แล้วรัน make_qr.py ใหม่)
+FEEDBACK_URL = "https://forms.gle/YOUR-FORM-ID-HERE"
 
 # ---------- First-run setup: ติดตั้ง dependencies ครั้งเดียว ----------
 REQUIRED = ["pymupdf", "Pillow", "docx2pdf", "pywin32"]
@@ -1339,6 +1343,7 @@ class PDFReader(tk.Tk):
 
         menubar.add_command(label="💾 บันทึก", command=self.save_doc)
         menubar.add_command(label="⛶ Full Screen", command=self.toggle_fullscreen)
+        menubar.add_command(label="📝 แบบสอบถาม", command=self._open_feedback)
         menubar.add_command(label="ℹ About", command=self._show_about)
         self._menubar = menubar
         self.config(menu=menubar)
@@ -1745,25 +1750,83 @@ class PDFReader(tk.Tk):
                 except Exception:
                     pass
 
+    def _open_feedback(self):
+        try:
+            webbrowser.open(FEEDBACK_URL)
+            self.status.config(text=f"เปิดแบบสอบถามในเบราว์เซอร์แล้ว")
+        except Exception as e:
+            messagebox.showerror("ผิดพลาด", f"เปิดลิงก์ไม่ได้:\n{e}")
+
+    def _find_qr_path(self):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        for name in (os.path.join(base, "qr_feedback.png"), "qr_feedback.png"):
+            if os.path.isfile(name):
+                return name
+        return None
+
     def _show_about(self):
-        messagebox.showinfo(
-            "เกี่ยวกับโปรแกรม",
-            "PDF Reader — Version 1.0\n"
-            "\n"
-            "พัฒนาโดย: Thanagrid C.\n"
-            "Faculty of Architecture, Kasetsart University\n"
-            "อีเมล: Thanagrid.c@ku.th\n"
-            "© 2026\n"
-            "\n"
-            "License: GNU AGPL-3.0\n"
-            "โปรแกรมนี้ไม่มีการรับประกัน; แจกจ่ายซ้ำได้ภายใต้เงื่อนไข AGPL-3.0\n"
-            "ดูรายละเอียดในไฟล์ LICENSE\n"
-            "\n"
-            "ใช้ไลบรารีของ:\n"
-            "• PyMuPDF (fitz) — AGPL-3.0 © Artifex Software\n"
-            "• Pillow — HPND\n"
-            "• PyInstaller — GPL + runtime exception"
-        )
+        dlg = tk.Toplevel(self)
+        dlg.title("เกี่ยวกับโปรแกรม")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        dlg.configure(bg="white")
+
+        frm = tk.Frame(dlg, bg="white", padx=24, pady=20)
+        frm.pack()
+
+        # หัวเรื่อง
+        tk.Label(frm, text="PDF Reader", bg="white",
+                 font=("Segoe UI", 18, "bold"), fg="#b81d13").pack(anchor="w")
+        tk.Label(frm, text="Version 1.0  ·  © 2026", bg="white",
+                 font=("Segoe UI", 9), fg="#666").pack(anchor="w", pady=(0, 12))
+
+        # ผู้พัฒนา
+        info = ("พัฒนาโดย: Thanagrid C.\n"
+                "Faculty of Architecture, Kasetsart University\n"
+                "อีเมล: Thanagrid.c@ku.th")
+        tk.Label(frm, text=info, bg="white", justify="left",
+                 font=("Segoe UI", 10)).pack(anchor="w")
+
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=12)
+
+        # QR + ปุ่มแบบสอบถาม
+        qr_row = tk.Frame(frm, bg="white")
+        qr_row.pack(fill="x")
+
+        qr_path = self._find_qr_path()
+        if qr_path:
+            try:
+                img = Image.open(qr_path)
+                img.thumbnail((140, 140))
+                self._about_qr_photo = ImageTk.PhotoImage(img)
+                tk.Label(qr_row, image=self._about_qr_photo, bg="white",
+                         bd=1, relief="solid").pack(side="left", padx=(0, 14))
+            except Exception:
+                pass
+        qr_txt = tk.Frame(qr_row, bg="white")
+        qr_txt.pack(side="left", anchor="n")
+        tk.Label(qr_txt, text="📝 แบบสอบถามความพึงพอใจ", bg="white",
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tk.Label(qr_txt, text="สแกน QR หรือกดปุ่มด้านล่างเพื่อ\nให้ feedback — ใช้เวลา ~3 นาที",
+                 bg="white", font=("Segoe UI", 9), fg="#555",
+                 justify="left").pack(anchor="w", pady=(2, 8))
+        ttk.Button(qr_txt, text="เปิดแบบสอบถาม",
+                   command=self._open_feedback).pack(anchor="w")
+
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=12)
+
+        # License
+        lic = ("License: GNU AGPL-3.0\n"
+               "แจกจ่ายซ้ำได้ภายใต้เงื่อนไข AGPL-3.0 · ไม่มีการรับประกัน\n\n"
+               "ใช้ไลบรารีของ:\n"
+               "• PyMuPDF (fitz) — AGPL-3.0 © Artifex Software\n"
+               "• Pillow — HPND\n"
+               "• PyInstaller — GPL + runtime exception")
+        tk.Label(frm, text=lic, bg="white", justify="left",
+                 font=("Segoe UI", 9), fg="#444").pack(anchor="w")
+
+        ttk.Button(frm, text="ปิด", command=dlg.destroy).pack(pady=(14, 0))
+        dlg.grab_set()
 
     def undo(self):
         t = self._active_tab()

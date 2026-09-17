@@ -168,6 +168,18 @@ Version 1.0
 
 ---
 
+## 📝 Feedback / แบบสอบถาม
+
+หากลองใช้แล้วมี feedback อยากขอความกรุณาสละเวลา ~3 นาทีตอบแบบสอบถาม
+เพื่อนำไปพัฒนาเวอร์ชั่นต่อไปครับ
+
+<img src="qr_feedback.png" alt="Feedback QR" width="180"/>
+
+**หรือคลิก:** https://forms.gle/YOUR-FORM-ID-HERE
+*(ลิงก์จะอัปเดตเมื่อเปิด Form พร้อมใช้)*
+
+---
+
 ## 🤝 Contributing
 
 ยินดีรับ issue / pull request ครับ
