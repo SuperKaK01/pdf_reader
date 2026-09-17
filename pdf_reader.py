@@ -537,14 +537,20 @@ class PDFTab(ttk.Frame):
         if not self.doc:
             return
         self._snapshot()
-        page = self.doc[self.page_index]
+        target = self.page_index
+        page = self.doc[target]
         page.set_rotation((page.rotation + delta) % 360)
-        self._words_cache.pop(self.page_index, None)
-        self._chars_cache.pop(self.page_index, None)
-        self._links_cache.pop(self.page_index, None)
+        self._words_cache.pop(target, None)
+        self._chars_cache.pop(target, None)
+        self._links_cache.pop(target, None)
         self.dirty = True
         self.render()
         self.render_thumbnails()
+        # หลัง render — เลื่อนกลับไปหน้าที่พึ่งหมุน (ไม่งั้น viewport
+        # อาจไปตกที่หน้าอื่นเพราะความสูงเปลี่ยน)
+        self.page_index = target
+        self._scroll_to_page(target)
+        self.app._sync_toolbar()
 
     def rotate_all(self, delta):
         if not self.doc:
