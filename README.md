@@ -163,7 +163,8 @@ If you fork or redistribute, your code must also be AGPL-3.0.
 ## 👤 ผู้พัฒนา / Author
 
 **Thanagrid C.** — thanagrid.c@ku.th
-Kasetsart University
+Faculty of Architecture, Kasetsart University
+Version 1.0
 
 ---
 

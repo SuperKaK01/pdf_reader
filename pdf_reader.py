@@ -1748,9 +1748,10 @@ class PDFReader(tk.Tk):
     def _show_about(self):
         messagebox.showinfo(
             "เกี่ยวกับโปรแกรม",
-            "PDF Reader\n"
+            "PDF Reader — Version 1.0\n"
             "\n"
             "พัฒนาโดย: Thanagrid C.\n"
+            "Faculty of Architecture, Kasetsart University\n"
             "อีเมล: Thanagrid.c@ku.th\n"
             "© 2026\n"
             "\n"
