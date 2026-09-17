@@ -33,13 +33,13 @@ def make_hires(size):
     # ตัวอักษร — เลือกตามขนาด
     if size <= 20:
         text = "P"
-        font = load_font(int(s * 0.75))
+        font = load_font(int(s * 0.78))
     elif size <= 40:
         text = "PDF"
-        font = load_font(int(s * 0.36))
+        font = load_font(int(s * 0.44))
     else:
         text = "PDF"
-        font = load_font(int(s * 0.34))
+        font = load_font(int(s * 0.46))
 
     bbox = d.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
