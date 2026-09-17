@@ -1,8 +1,10 @@
 """
 PDF Reader - Desktop App
 Developed by Thanagrid C. <Thanagrid.c@ku.th>
-Copyright (c) 2026
-Licensed under the MIT License — see LICENSE file for details.
+Copyright (C) 2026 Thanagrid C.
+Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).
+See LICENSE file for details. This program uses PyMuPDF which is also
+distributed under AGPL-3.0.
 
 ต้องติดตั้ง: pip install PyMuPDF Pillow docx2pdf pywin32
 รัน: python pdf_reader.py
@@ -1750,9 +1752,16 @@ class PDFReader(tk.Tk):
             "\n"
             "พัฒนาโดย: Thanagrid C.\n"
             "อีเมล: Thanagrid.c@ku.th\n"
+            "© 2026\n"
             "\n"
-            "License: MIT\n"
-            "© 2026"
+            "License: GNU AGPL-3.0\n"
+            "โปรแกรมนี้ไม่มีการรับประกัน; แจกจ่ายซ้ำได้ภายใต้เงื่อนไข AGPL-3.0\n"
+            "ดูรายละเอียดในไฟล์ LICENSE\n"
+            "\n"
+            "ใช้ไลบรารีของ:\n"
+            "• PyMuPDF (fitz) — AGPL-3.0 © Artifex Software\n"
+            "• Pillow — HPND\n"
+            "• PyInstaller — GPL + runtime exception"
         )
 
     def undo(self):
