@@ -138,6 +138,8 @@ class PDFTab(ttk.Frame):
         self._sel_text = ""
         self._chars_cache = {}
         self._words_cache = {}       # legacy (ยังเผื่อไว้)
+        self._links_cache = {}
+        self._link_pending = None
         self._bind_selection()
 
         self.after(80, self.render_thumbnails)
@@ -147,7 +149,55 @@ class PDFTab(ttk.Frame):
         self.canvas.bind("<B1-Motion>", self._sel_motion)
         self.canvas.bind("<ButtonRelease-1>", self._sel_release)
         self.canvas.bind("<Button-3>", self._sel_context_menu)
+        self.canvas.bind("<Motion>", self._hover)
         self.canvas.config(cursor="xterm")
+
+    # ---------- Links ----------
+    def _get_links(self, page_idx):
+        if page_idx not in self._links_cache:
+            try:
+                self._links_cache[page_idx] = self.doc[page_idx].get_links() or []
+            except Exception:
+                self._links_cache[page_idx] = []
+        return self._links_cache[page_idx]
+
+    def _link_at(self, page_idx, x, y):
+        for link in self._get_links(page_idx):
+            r = link.get("from")
+            if r and r.x0 <= x <= r.x1 and r.y0 <= y <= r.y1:
+                return link
+        return None
+
+    def _hover(self, e):
+        if self._any_mode_active():
+            return
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        info = self._canvas_to_pdf(cx, cy)
+        if info is None:
+            self.canvas.config(cursor="xterm")
+            return
+        p, px, py = info
+        link = self._link_at(p, px, py)
+        if link:
+            self.canvas.config(cursor="hand2")
+            uri = link.get("uri") or f"หน้า {link.get('page', 0) + 1}"
+            self.app.status.config(text=f"🔗 {uri}")
+        else:
+            self.canvas.config(cursor="xterm")
+
+    def _open_link(self, link):
+        uri = link.get("uri")
+        if uri:
+            try:
+                webbrowser.open(uri)
+                self.app.status.config(text=f"เปิด {uri}")
+            except Exception as e:
+                messagebox.showerror("ผิดพลาด", f"เปิดลิงก์ไม่ได้:\n{e}")
+            return
+        # link ภายใน (ไปหน้าอื่น)
+        target = link.get("page")
+        if target is not None and 0 <= target < len(self.doc):
+            self.go_to_page(target)
 
     def _any_mode_active(self):
         return any(getattr(self, m, False) for m in
@@ -283,6 +333,7 @@ class PDFTab(ttk.Frame):
 
     def _sel_press(self, e):
         self._clear_sel_highlight()
+        self._link_pending = None
         if self._any_mode_active():
             return
         cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
@@ -291,6 +342,12 @@ class PDFTab(ttk.Frame):
             self._sel_start = None
             return
         p, px, py = info
+        # ตรวจ link ก่อน — ถ้ากดโดนลิงก์ ให้รอ release เพื่อเปิด (ไม่ start select)
+        link = self._link_at(p, px, py)
+        if link:
+            self._link_pending = (p, link, e.x, e.y)
+            self._sel_start = None
+            return
         idx = self._char_index_at(p, px, py)
         if idx is None:
             self._sel_start = None
@@ -299,7 +356,15 @@ class PDFTab(ttk.Frame):
         self._sel_end = (p, idx)
 
     def _sel_motion(self, e):
-        if self._any_mode_active() or not self._sel_start:
+        if self._any_mode_active():
+            return
+        # ถ้ากดโดน link แล้วลากไกลกว่า 5px → ยกเลิก link (แต่ไม่เริ่ม select)
+        if self._link_pending:
+            _, _, sx, sy = self._link_pending
+            if abs(e.x - sx) + abs(e.y - sy) > 5:
+                self._link_pending = None
+            return
+        if not self._sel_start:
             return
         cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
         info = self._canvas_to_pdf(cx, cy)
@@ -313,7 +378,15 @@ class PDFTab(ttk.Frame):
         self._draw_sel_highlight(self._sel_start, self._sel_end)
 
     def _sel_release(self, e):
-        if self._any_mode_active() or not self._sel_start or not self._sel_end:
+        if self._any_mode_active():
+            return
+        # ปล่อยเมาส์บน link ที่กดค้างอยู่ → เปิดลิงก์
+        if self._link_pending:
+            _, link, _, _ = self._link_pending
+            self._link_pending = None
+            self._open_link(link)
+            return
+        if not self._sel_start or not self._sel_end:
             return
         text = self._selected_text(self._sel_start, self._sel_end)
         self._sel_text = text
@@ -429,6 +502,7 @@ class PDFTab(ttk.Frame):
         self.page_index = min(cur_page, len(self.doc) - 1)
         self._words_cache = {}
         self._chars_cache = {}
+        self._links_cache = {}
         self.render()
         self.render_thumbnails()
 
@@ -467,6 +541,7 @@ class PDFTab(ttk.Frame):
         page.set_rotation((page.rotation + delta) % 360)
         self._words_cache.pop(self.page_index, None)
         self._chars_cache.pop(self.page_index, None)
+        self._links_cache.pop(self.page_index, None)
         self.dirty = True
         self.render()
         self.render_thumbnails()
@@ -479,6 +554,7 @@ class PDFTab(ttk.Frame):
             p.set_rotation((p.rotation + delta) % 360)
         self._words_cache = {}
         self._chars_cache = {}
+        self._links_cache = {}
         self.dirty = True
         self.render()
         self.render_thumbnails()
